@@ -1,0 +1,6 @@
+---
+# Arduino .ino ファイルは clangd が解析できないため診断を無効化
+If:
+  PathMatch: ".*\\.ino"
+Diagnostics:
+  Suppress: "*"
