@@ -19,20 +19,15 @@
 #include <M5Stack.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <LittleFS.h>
 #include "AudioTools.h"
 #include "SnapClient.h"
 #include "AudioTools/AudioCodecs/CodecOpus.h"
 
 // ═══════════════════════════════════════════════════════════════
-//  設定 — ここを書き換えてください
+//  設定 — data/.env に WIFI_SSID / WIFI_PASSWORD を記入してください
+//         Arduino IDE「ESP32 LittleFS Data Upload」で書き込み後に使用
 // ═══════════════════════════════════════════════════════════════
-
-#ifndef CONFIG_WIFI_SSID
-#define CONFIG_WIFI_SSID     "your_ssid"
-#endif
-#ifndef CONFIG_WIFI_PASSWORD
-#define CONFIG_WIFI_PASSWORD "your_password"
-#endif
 
 // Snapcast サーバーは mDNS で自動検出（デフォルト）
 // 手動指定したい場合は以下のコメントを外して IP を入力
@@ -75,7 +70,8 @@ enum AppState {
 };
 
 AppState     appState   = STATE_BOOT;
-String       wifiSSID   = CONFIG_WIFI_SSID;
+String       wifiSSID   = "";
+String       wifiPassword = "";
 String       localIP    = "";
 unsigned long stateTimer = 0;
 unsigned long animTimer  = 0;
@@ -91,6 +87,50 @@ OpusAudioDecoder   opusDecoder;
 WiFiClient         wifiClient;
 SnapTimeSyncDynamic synch(172, 10);
 SnapClient         snapClient(wifiClient, i2sOut, opusDecoder);
+
+// ═══════════════════════════════════════════════════════════════
+//  .env 読み込み (LittleFS)
+// ═══════════════════════════════════════════════════════════════
+
+// src 内から "KEY=VALUE" 形式の値を返す（# 行はスキップ）
+static String envGet(const String& src, const String& key) {
+  String prefix = key + "=";
+  int pos = 0;
+  while (pos < (int)src.length()) {
+    int nl = src.indexOf('\n', pos);
+    if (nl < 0) nl = src.length();
+    String line = src.substring(pos, nl);
+    line.trim();
+    if (line.length() > 0 && line[0] != '#' && line.startsWith(prefix)) {
+      String val = line.substring(prefix.length());
+      val.trim();
+      return val;
+    }
+    pos = nl + 1;
+  }
+  return "";
+}
+
+// LittleFS の /.env を読み込んで wifiSSID / wifiPassword を設定
+static void loadEnv() {
+  if (!LittleFS.begin(false)) {
+    Serial.println("[env] LittleFS mount failed — data/ フォルダをアップロードしてください");
+    return;
+  }
+  File f = LittleFS.open("/.env", "r");
+  if (!f) {
+    Serial.println("[env] /.env が見つかりません — data/ フォルダをアップロードしてください");
+    LittleFS.end();
+    return;
+  }
+  String src = f.readString();
+  f.close();
+  LittleFS.end();
+
+  wifiSSID     = envGet(src, "WIFI_SSID");
+  wifiPassword = envGet(src, "WIFI_PASSWORD");
+  Serial.printf("[env] SSID=%s\n", wifiSSID.c_str());
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  ES8388 初期化
@@ -443,6 +483,7 @@ void updateStatusLive() {
 void setup() {
   M5.begin();
   Serial.begin(115200);
+  loadEnv();
   M5.Lcd.fillScreen(C_BG);
   M5.Lcd.setBrightness(160);
 
@@ -457,7 +498,7 @@ void setup() {
   drawWifiConnecting();
   animTimer = millis();
 
-  WiFi.begin(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
   while (WiFi.status() != WL_CONNECTED) {
     delay(200);
     if (millis() - animTimer > 200) {
