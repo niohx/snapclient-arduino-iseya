@@ -1,2 +1,3 @@
 # WiFi 認証情報 — コミット禁止
 .env
+/data/.env

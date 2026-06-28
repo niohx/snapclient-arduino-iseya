@@ -7,16 +7,20 @@
  *   起動 → WiFi接続中 → WiFi接続完了 → サーバー検索中 → サーバー接続完了 → ステータス
  *
  * 依存ライブラリ:
- *   - arduino-snapclient  https://github.com/pschatzmann/arduino-snapclient
+ *   - M5Unified           https://github.com/m5stack/M5Unified
+ *   - M5Module-Audio      https://github.com/m5stack/M5Module-Audio
+ *   - arduino-snapclient  https://github.com/pschatzmann/arduino-snapclient (main branch)
  *   - arduino-audio-tools https://github.com/pschatzmann/arduino-audio-tools
  *   - arduino-libopus     https://github.com/pschatzmann/arduino-libopus
- *   - M5Stack             (ボードマネージャー経由)
  */
 
 // loop() タスクのスタックサイズ拡張（AudioTools が必要）
 #define ARDUINO_LOOP_STACK_SIZE (10 * 1024)
+#define CORE_DEBUG_LEVEL 1
 
-#include <M5Stack.h>
+#include <M5Unified.h>
+#include "audio_i2c.hpp"
+#include "es8388.hpp"
 #include <Wire.h>
 #include <WiFi.h>
 #include <LittleFS.h>
@@ -25,19 +29,16 @@
 #include "AudioTools/AudioCodecs/CodecOpus.h"
 
 // ═══════════════════════════════════════════════════════════════
-//  設定 — data/.env に WIFI_SSID / WIFI_PASSWORD を記入してください
-//         Arduino IDE「ESP32 LittleFS Data Upload」で書き込み後に使用
+//  設定 — data/.env に以下を記入してください
+//    WIFI_SSID / WIFI_PASSWORD / SNAPCAST_HOST
+//  Ctrl+Shift+P → "Upload LittleFS" で書き込み
 // ═══════════════════════════════════════════════════════════════
-
-// Snapcast サーバーは mDNS で自動検出（デフォルト）
-// 手動指定したい場合は以下のコメントを外して IP を入力
-// #define CONFIG_SNAPCAST_SERVER_HOST "192.168.1.33"
 
 // ─── I2S ピン (M5Stack Core + M5Stack Audio Module) ───────────
 #define PIN_MCLK   0
-#define PIN_BCLK  12
-#define PIN_WS    13
-#define PIN_DATA   2
+#define PIN_BCLK  13
+#define PIN_WS    12
+#define PIN_DATA  15
 
 // ─── ES8388 ───────────────────────────────────────────────────
 #define ES8388_ADDR  0x10
@@ -72,16 +73,17 @@ enum AppState {
 AppState     appState   = STATE_BOOT;
 String       wifiSSID   = "";
 String       wifiPassword = "";
+String       snapcastHost = "";
 String       localIP    = "";
 unsigned long stateTimer = 0;
 unsigned long animTimer  = 0;
-unsigned long clockTimer = 0;
 int          animStep   = 0;
-bool         dimmed     = false;   // 輝度トグル用
 
 // ═══════════════════════════════════════════════════════════════
 //  オーディオ
 // ═══════════════════════════════════════════════════════════════
+AudioI2c           audioI2c;
+ES8388             es8388(&Wire, I2C_SDA, I2C_SCL);
 I2SStream          i2sOut;
 OpusAudioDecoder   opusDecoder;
 WiFiClient         wifiClient;
@@ -129,56 +131,11 @@ static void loadEnv() {
 
   wifiSSID     = envGet(src, "WIFI_SSID");
   wifiPassword = envGet(src, "WIFI_PASSWORD");
-  Serial.printf("[env] SSID=%s\n", wifiSSID.c_str());
+  snapcastHost = envGet(src, "SNAPCAST_HOST");
+  Serial.printf("[env] SSID=%s HOST=%s\n", wifiSSID.c_str(), snapcastHost.c_str());
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  ES8388 初期化
-// ═══════════════════════════════════════════════════════════════
-static void esWrite(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(ES8388_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  Wire.endTransmission();
-}
-
-void initES8388() {
-  Wire.begin(I2C_SDA, I2C_SCL);
-  delay(20);
-
-  esWrite(0x00, 0x80);  // チップリセット
-  delay(50);
-  esWrite(0x00, 0x00);  // 通常モード復帰
-
-  esWrite(0x01, 0x50);  // CHIPPOWER: VREF・IREF オン
-  esWrite(0x08, 0x00);  // MASTERMODE: スレーブ (ESP32 が I2S マスター)
-
-  // ADC をパワーダウン、DAC をパワーアップ
-  esWrite(0x03, 0xFF);  // ADCPOWER: 全オフ
-  esWrite(0x04, 0xC0);  // DACPOWER: LOUT/ROUT はまだオフ
-
-  // DAC I2S: I2S フォーマット、16bit
-  esWrite(0x17, 0x18);  // DACCONTROL1: I2S, 16-bit
-  esWrite(0x18, 0x02);  // DACCONTROL2: 標準速度
-  esWrite(0x19, 0x22);  // DACCONTROL3: ミュート解除
-
-  // DAC ボリューム: 0dB
-  esWrite(0x1A, 0x00);
-  esWrite(0x1B, 0x00);
-
-  // 出力ミキサー: DAC → LOUT1 / ROUT1
-  esWrite(0x27, 0xB8);  // 左ミキサー
-  esWrite(0x2A, 0xB8);  // 右ミキサー
-
-  // 出力ボリューム (0–33, 33 = 最大)
-  esWrite(0x2E, 28);    // LOUT1
-  esWrite(0x2F, 28);    // ROUT1
-
-  // DAC 出力段を有効化
-  esWrite(0x04, 0x3C);  // DACPOWER: LOUT1/ROUT1 オン
-  esWrite(0x01, 0x00);  // CHIPPOWER: フルパワーアップ
-  delay(50);
-}
+// ES8388初期化はM5ModuleAudioライブラリが担当
 
 // ═══════════════════════════════════════════════════════════════
 //  共通 UI パーツ
@@ -375,7 +332,7 @@ void drawServerConnected() {
   M5.Lcd.setTextColor(C_CYAN);
   M5.Lcd.setTextSize(2);
   M5.Lcd.setCursor(10, 120);
-  M5.Lcd.print("Auto (mDNS)");
+  M5.Lcd.print(snapcastHost.length() > 0 ? snapcastHost : "Auto (mDNS)");
 
   M5.Lcd.setTextColor(C_GRAY);
   M5.Lcd.setTextSize(1);
@@ -402,13 +359,12 @@ void drawStatusScreen() {
   drawHLine(22);
 
   // ── WiFi / サーバー情報 ──────────────────────────────
-  const int ROW1 = 30, ROW2 = 46, ROW3 = 62;
-  const int COL_L = 6, COL_V = 56;
-
+  const int COL_L = 6;
   M5.Lcd.setTextSize(1);
-  drawKV(COL_L, ROW1, "WiFi  :", wifiSSID.c_str(),     C_GRAY, C_WHITE);
-  drawKV(COL_L, ROW2, "IP    :", localIP.c_str(),       C_GRAY, C_WHITE);
-  drawKV(COL_L, ROW3, "Server:", "Auto (mDNS) :1704",   C_GRAY, C_CYAN);
+  drawKV(COL_L, 30, "WiFi  :", wifiSSID.c_str(),     C_GRAY, C_WHITE);
+  drawKV(COL_L, 46, "IP    :", localIP.c_str(),       C_GRAY, C_WHITE);
+  String serverDisp = snapcastHost.length() > 0 ? snapcastHost + ":1704" : "Auto (mDNS) :1704";
+  drawKV(COL_L, 62, "Server:", serverDisp.c_str(),   C_GRAY, C_CYAN);
 
   drawHLine(76);
 
@@ -424,57 +380,6 @@ void drawStatusScreen() {
   M5.Lcd.setTextSize(1);
   M5.Lcd.setCursor(8, 110);
   M5.Lcd.print("Codec: Opus   Sync: Active");
-
-  drawHLine(133);
-
-  // ── ボタンヒント ────────────────────────────────────
-  M5.Lcd.setTextColor(C_DGRAY);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(6, 140);
-  M5.Lcd.print("[A] Brightness");
-  M5.Lcd.setCursor(160, 140);
-  M5.Lcd.print("[C] Reconnect");
-
-  drawHLine(152);
-
-  // ── シグナルバー (WiFi RSSI) ──────────────────────────
-  M5.Lcd.setTextColor(C_GRAY);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(6, 160);
-  M5.Lcd.print("WiFi Signal:");
-}
-
-// シグナルバー & 稼働時間を1秒毎に更新
-void updateStatusLive() {
-  // 稼働時間 (右上)
-  unsigned long s = millis() / 1000;
-  unsigned long m = s / 60; s %= 60;
-  unsigned long h = m / 60; m %= 60;
-  char tbuf[10];
-  snprintf(tbuf, sizeof(tbuf), "%02lu:%02lu:%02lu", h, m, s);
-  M5.Lcd.fillRect(210, 5, 104, 14, C_PANEL);
-  M5.Lcd.setTextColor(C_GRAY);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(212, 8);
-  M5.Lcd.print(tbuf);
-
-  // WiFi RSSI バー (右下エリア)
-  int32_t rssi = WiFi.RSSI();
-  int strength = map(constrain(rssi, -90, -40), -90, -40, 0, 5); // 0-5本
-  M5.Lcd.fillRect(100, 158, 210, 14, C_BG);
-  for (int i = 0; i < 5; i++) {
-    uint16_t c = (i < strength) ? C_CYAN : C_DGRAY;
-    int bh = 4 + i * 2;
-    M5.Lcd.fillRect(100 + i * 22, 172 - bh, 18, bh, c);
-  }
-
-  // RSSI 数値
-  M5.Lcd.setTextColor(C_GRAY);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(220, 160);
-  char rbuf[12];
-  snprintf(rbuf, sizeof(rbuf), "%d dBm", (int)rssi);
-  M5.Lcd.print(rbuf);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -483,6 +388,7 @@ void updateStatusLive() {
 void setup() {
   M5.begin();
   Serial.begin(115200);
+  AudioLogger::instance().begin(Serial, AudioLogger::Error);
   loadEnv();
   M5.Lcd.fillScreen(C_BG);
   M5.Lcd.setBrightness(160);
@@ -512,27 +418,62 @@ void setup() {
   localIP = WiFi.localIP().toString();
   appState = STATE_WIFI_CONNECTED;
   drawWifiConnected();
+  Serial.printf("[wifi] Connected! IP=%s\n", localIP.c_str());
   delay(1800);
 
-  // ④ ES8388 + I2S 初期化
-  initES8388();
+  // ④ M5Module-Audio (ES8388 + STM32) 初期化
+  Serial.println("[audio] AudioI2c + ES8388 init...");
+  audioI2c.begin(&Wire, I2C_SDA, I2C_SCL, 100000, 0x33);
+  audioI2c.setHPMode(AUDIO_HPMODE_NATIONAL);
+  audioI2c.setMICStatus(AUDIO_MIC_CLOSE);
+  Serial.printf("[audio] HP insert: %d\n", audioI2c.getHPInsertStatus());
+  Serial.printf("[audio] FW version: %d\n", audioI2c.getFirmwareVersion());
 
-  auto cfg      = i2sOut.defaultConfig();
-  cfg.pin_mck   = PIN_MCLK;
-  cfg.pin_bck   = PIN_BCLK;
-  cfg.pin_ws    = PIN_WS;
-  cfg.pin_data  = PIN_DATA;
-  i2sOut.begin(cfg);
+  es8388.init();
+  es8388.setDACOutput(DAC_OUTPUT_ALL);
+  es8388.setDACVolume(80);
+  es8388.setDACmute(false);
+  es8388.setSampleRate(SAMPLE_RATE_48K);
+  es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
+  Serial.println("[audio] ES8388 configured");
 
-  // ⑤ Snapclient 開始 (mDNS 自動検出)
+  // I2S出力 (audio-tools)
+  auto cfg            = i2sOut.defaultConfig(TX_MODE);
+  cfg.sample_rate     = 48000;
+  cfg.bits_per_sample = 16;
+  cfg.channels        = 2;
+  cfg.use_apll        = true;
+  cfg.buffer_count    = 8;
+  cfg.buffer_size     = 512;
+  cfg.pin_mck         = PIN_MCLK;
+  cfg.pin_bck         = PIN_BCLK;
+  cfg.pin_ws          = PIN_WS;
+  cfg.pin_data        = PIN_DATA;
+  bool i2sOk = i2sOut.begin(cfg);
+  Serial.printf("[audio] I2S begin = %s\n", i2sOk ? "OK" : "FAILED");
+
+  // ⑤ Snapclient 開始
   appState  = STATE_SERVER_SEARCHING;
   animStep  = 0;
   stateTimer = millis();
   animTimer  = millis();
   drawServerSearching();
 
+  if (snapcastHost.length() > 0) {
+    IPAddress serverIP;
+    serverIP.fromString(snapcastHost);
+    snapClient.setServerIP(serverIP);
+  }
+  Serial.printf("[snap] Connecting to %s:%d ...\n", snapcastHost.c_str(), 1704);
   snapClient.begin(synch);
-  // 以降は loop() で doLoop() を呼ぶ
+  Serial.println("[snap] begin() done");
+
+  // 接続完了画面 → ステータス画面
+  appState = STATE_SERVER_CONNECTED;
+  drawServerConnected();
+  delay(2000);
+  appState = STATE_STATUS;
+  drawStatusScreen();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -540,7 +481,6 @@ void setup() {
 // ═══════════════════════════════════════════════════════════════
 void loop() {
   M5.update();
-  snapClient.doLoop();
 
   switch (appState) {
 
@@ -565,36 +505,15 @@ void loop() {
       if (millis() - stateTimer > 2000) {
         appState = STATE_STATUS;
         drawStatusScreen();
-        clockTimer = millis();
       }
       break;
 
-    // ── ステータス画面 ──────────────────────────────────────
     case STATE_STATUS:
-      // 1 秒毎に稼働時間・シグナルバーを更新
-      if (millis() - clockTimer > 1000) {
-        updateStatusLive();
-        clockTimer = millis();
-      }
-
-      // ボタン A: 輝度切替 (160 ↔ 255)
-      if (M5.BtnA.wasPressed()) {
-        dimmed = !dimmed;
-        M5.Lcd.setBrightness(dimmed ? 80 : 160);
-      }
-
-      // ボタン C: Snapserver 再接続
-      if (M5.BtnC.wasPressed()) {
-        appState   = STATE_SERVER_SEARCHING;
-        animStep   = 0;
-        stateTimer = millis();
-        animTimer  = millis();
-        drawServerSearching();
-        snapClient.begin(synch);
-      }
       break;
 
     default:
       break;
   }
+
+  snapClient.doLoop();
 }

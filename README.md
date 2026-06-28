@@ -1,161 +1,152 @@
-# snapclient-arduino-iseya
+# Snapclient Iseya
 
-M5Stack + M5Stack オーディオモジュール（ES8388）を使った [Snapcast](https://github.com/badaix/snapcast) クライアントのArduinoスケッチです。  
-[arduino-snapclient](https://github.com/pschatzmann/arduino-snapclient) ライブラリをベースに、Wi-Fi経由でSnapcastサーバーと同期再生します。
+M5Stack Basic + M5Stack Module Audio (ES8388) で動作する Snapcast クライアント。
 
----
+Snapcast サーバーから Opus ストリームを受信し、ES8388 DAC 経由でヘッドホン出力します。
 
 ## ハードウェア
 
 | 部品 | 製品 |
 |------|------|
-| マイコン | [M5Stack Core](https://docs.m5stack.com/) シリーズ（ESP32） |
-| オーディオモジュール | [M5Stack オーディオモジュール（STM32G030）](https://ssci.to/10417) |
+| マイコン | [M5Stack Basic](https://docs.m5stack.com/en/core/basic) (v2.7+ / ESP32) |
+| オーディオモジュール | [M5Stack Module Audio (M144)](https://ssci.to/10417) (ES8388 + STM32G030) |
+| 出力 | ヘッドホン (モジュールの TRRS ジャック接続) |
 
-### 接続
+M5Stack オーディオモジュールを M5Stack の底面モジュールポートに装着します。
+I2S / I2C の接続は M-Bus 経由で自動的に行われます。
 
-M5Stack オーディオモジュールをM5Stackの底面モジュールポートに装着します。  
-I2S（オーディオ）とI2C（ES8388コーデック制御）の接続はM-Bus経由で自動的に行われます。
+### I2S ピン配置 (M5Stack Basic + Module Audio)
 
 | 信号 | GPIO |
 |------|------|
-| I2S MCLK | GPIO 0 |
-| I2S BCLK | GPIO 12 |
-| I2S WS (LRCK) | GPIO 13 |
-| I2S DOUT | GPIO 2 |
-| I2C SDA | GPIO 21 |
-| I2C SCL | GPIO 22 |
+| MCLK | 0 |
+| BCLK (SCLK) | 13 |
+| WS (LRCK) | 12 |
+| DOUT | 15 |
+| DIN | 34 |
+| I2C SDA | 21 |
+| I2C SCL | 22 |
 
-> **Note:** 使用するM5Stackモデルによってピン番号が異なる場合があります。M5Stackの公式ドキュメントで確認してください。
+> Core2 / CoreS3 ではピン番号が異なります。M5Stack 公式ドキュメントを確認してください。
 
----
-
-## 必要なライブラリ
-
-Arduino IDEのライブラリマネージャーまたは以下のリポジトリからインストールしてください。
-
-| ライブラリ | 入手先 | 必須/任意 |
-|-----------|--------|-----------|
-| arduino-snapclient | https://github.com/pschatzmann/arduino-snapclient | 必須 |
-| arduino-audio-tools | https://github.com/pschatzmann/arduino-audio-tools | 必須 |
-| arduino-libopus | https://github.com/pschatzmann/arduino-libopus | 任意（Opus使用時） |
-
----
-
-## インストール手順
+## セットアップ
 
 ### 1. Arduino IDE の準備
 
-Arduino IDE 2.x をインストールし、ESP32ボードパッケージを追加します。
+Arduino IDE 2.x に M5Stack ボードパッケージをインストールします。
 
-1. **環境設定** → 追加のボードマネージャーURLに以下を追加:
-   ```
-   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-   ```
-2. **ボードマネージャー** で `esp32 by Espressif Systems` をインストール
+1. **環境設定** → 追加のボードマネージャー URL に M5Stack の URL を追加
+2. **ボードマネージャー** で `M5Stack` をインストール
 
 ### 2. ライブラリのインストール
 
-ライブラリはZIPダウンロードまたは `git clone` でインストールします。  
-Arduino のライブラリフォルダ（通常 `~/Documents/Arduino/libraries/`）で以下を実行:
+以下のライブラリを全てインストールしてください。
 
-```bash
-# 必須
-git clone https://github.com/pschatzmann/arduino-snapclient.git
-git clone https://github.com/pschatzmann/arduino-audio-tools.git
+| ライブラリ | インストール方法 | 備考 |
+|---|---|---|
+| [M5Unified](https://github.com/m5stack/M5Unified) | ライブラリマネージャー | |
+| [M5GFX](https://github.com/m5stack/M5GFX) | ライブラリマネージャー | |
+| [M5Module-Audio](https://github.com/m5stack/M5Module-Audio) | ZIP インストール | |
+| [arduino-audio-tools](https://github.com/pschatzmann/arduino-audio-tools) | ZIP インストール | |
+| [arduino-snapclient](https://github.com/pschatzmann/arduino-snapclient) | ZIP インストール | **main ブランチ必須** |
+| [arduino-libopus](https://github.com/pschatzmann/arduino-libopus) | ZIP インストール | |
 
-# 任意（Opusコーデックを使う場合）
-git clone https://github.com/pschatzmann/arduino-libopus.git
+> **重要**: arduino-snapclient は **main ブランチの ZIP** (`Code → Download ZIP`) を使用してください。
+> リリース版 (v0.2.0) は audio-tools v1.2.x と互換性がありません。
+
+### 3. LittleFS Upload プラグイン
+
+Arduino IDE 2.x で LittleFS にファイルを書き込むためのプラグインが必要です。
+
+1. [arduino-littlefs-upload](https://github.com/earlephilhower/arduino-littlefs-upload/releases) から `.vsix` をダウンロード
+2. `~/.arduinoIDE/plugins/` にコピー
+3. Arduino IDE を再起動
+
+### 4. 設定ファイルの準備
+
+`snapclient-iseya/data/.env.example` を `snapclient-iseya/data/.env` にコピーして編集:
+
+```env
+WIFI_SSID=your-wifi-ssid
+WIFI_PASSWORD=your-wifi-password
+SNAPCAST_HOST=192.168.x.x
 ```
 
-または Arduino IDE の **スケッチ → ライブラリをインクルード → .ZIP形式のライブラリをインストール** からZIPを指定してもOKです。
+| キー | 説明 |
+|---|---|
+| `WIFI_SSID` | WiFi の SSID |
+| `WIFI_PASSWORD` | WiFi のパスワード |
+| `SNAPCAST_HOST` | Snapcast サーバーの IP アドレス |
 
-### 3. スケッチの設定
+`.env` は `.gitignore` に含まれているためコミットされません。
 
-`SnapConfig.h` またはスケッチ内で以下を設定します:
+### 5. Arduino IDE のボード設定
 
-```cpp
-// Wi-Fi 設定
-#define CONFIG_WIFI_SSID     "your_ssid"
-#define CONFIG_WIFI_PASSWORD "your_password"
+| 設定項目 | 値 |
+|---|---|
+| ボード | **M5Stack-Core** |
+| Partition Scheme | **Huge APP (3MB No OTA/1MB SPIFFS)** |
+| Core Debug Level | **Error** |
+| Upload Speed | 1500000 |
 
-// SnapcastサーバーのIPアドレス（フォールバック用）
-// デフォルトでmDNSにより自動検出されるため、指定不要な場合がほとんど
-#define CONFIG_SNAPCAST_SERVER_HOST "192.168.x.x"
-```
+### 6. 書き込み
 
-### 4. ボードの選択と書き込み
+1. **LittleFS 書き込み**: `Ctrl + Shift + P` → **Upload LittleFS to Pico/ESP8266/ESP32**
+2. **スケッチ書き込み**: 通常通りアップロード
 
-Arduino IDEで次の設定を行ってから書き込みます:
+## Snapcast サーバーの設定
 
-- **ボード:** `M5Stack-Core-ESP32`（または使用モデルに合わせて選択）
-- **パーティションスキーム:** `Huge APP (3MB No OTA/1MB SPIFFS)` ※ライブラリサイズが大きいため推奨
-- **ポート:** 接続したCOMポート
+### コーデック
 
----
+サーバー側でストリームのコーデックを Opus に設定してください。
 
-## スケッチ例
-
-スケッチは `snapclient-iseya/snapclient-iseya.ino` に収録しています。
-
-M5Stack の画面遷移を含む完全な実装です:
-
-```
-起動画面 → WiFi接続中 → WiFi接続完了 → サーバー検索中 → 接続完了 → ステータス画面
-```
-
-**ステータス画面の内容:**
-- WiFi SSID / IP アドレス
-- Snapserver 接続先
-- 再生状態・コーデック
-- 稼働時間（右上、1秒更新）
-- WiFi 電波強度バー（RSSI）
-
-**ボタン操作:**
-| ボタン | 動作 |
-|--------|------|
-| A | 輝度切替（160 ↔ 80）|
-| C | Snapserver 再接続 |
-
----
-
-## Snapcastサーバー側の設定
-
-`/etc/snapserver.conf` でコーデックを Opus に設定して再起動します:
+`/etc/snapserver.conf`:
 
 ```ini
 [stream]
-codec = opus
+source = tcp://0.0.0.0:4953?name=Spotify&codec=opus
 ```
+
+設定変更後にサーバーを再起動:
 
 ```bash
 sudo systemctl restart snapserver
 ```
 
-動作確認用のテストストリーム再生例:
+WSL 環境の場合:
 
 ```bash
-ffmpeg -i http://stream.example.com/audio.mp3 \
-  -f s16le -ar 48000 -ac 2 /tmp/snapfifo
+sudo killall snapserver
+snapserver -d -c /etc/snapserver.conf
 ```
 
----
+### クライアントのグループ割り当て
+
+Snapcast 管理画面 (`http://<server-ip>:1780`) で、**arduino-snapclient** を目的のストリームグループ (例: Spotify) に割り当ててください。
+
+## 画面遷移
+
+```
+起動画面 → WiFi接続中 → WiFi接続完了 → サーバー接続完了 → ステータス画面
+```
+
+ステータス画面には WiFi SSID / IP、サーバー IP、再生状態が表示されます。
 
 ## トラブルシューティング
 
-| 症状 | 確認ポイント |
-|------|-------------|
-| コンパイルエラー | ライブラリが正しくインストールされているか確認 |
-| Wi-Fi に繋がらない | SSID / パスワードを確認 |
-| サーバーに繋がらない | snapserver のIPアドレスとポート（デフォルト: 1704）を確認 |
-| 音が出ない | I2S のピン番号とM5Stackモデルが合っているか確認 |
-| 音が途切れる | `cfg.buffer_size` / `cfg.buffer_count` を増やしてみる |
-
----
+| 症状 | 対処 |
+|------|------|
+| コンパイルエラー: スケッチが大きすぎる | Partition Scheme を **Huge APP** に変更 |
+| WiFi に接続できない | `data/.env` を LittleFS にアップロードしたか確認 |
+| サーバーに接続できない | `.env` の `SNAPCAST_HOST` が正しいか確認 |
+| 音が出ない | ヘッドホンがモジュールの **TRRS ジャック** に接続されているか確認 |
+| 音が出ない | Snapcast 管理画面でクライアントが正しいグループに入っているか確認 |
+| 音が出ない | サーバーのコーデックが `opus` になっているか確認 |
 
 ## 参考リンク
 
 - [arduino-snapclient](https://github.com/pschatzmann/arduino-snapclient)
 - [arduino-audio-tools](https://github.com/pschatzmann/arduino-audio-tools)
-- [Snapcast (サーバー)](https://github.com/badaix/snapcast)
-- [M5Stack オーディオモジュール（スイッチサイエンス）](https://ssci.to/10417)
+- [Snapcast](https://github.com/badaix/snapcast)
+- [M5Stack Module Audio (スイッチサイエンス)](https://ssci.to/10417)
+- [M5Stack Module Audio ドキュメント](https://docs.m5stack.com/en/module/Module-Audio)
