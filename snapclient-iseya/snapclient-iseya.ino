@@ -1,14 +1,13 @@
 /**
  * snapclient-iseya.ino
  *
- * M5Stack + M5Stack Audio Module (ES8388) 用 Snapcast クライアント
+ * M5Stack + RCA Module 13.2 (PCM5102A) 用 Snapcast クライアント
  *
  * 画面遷移:
- *   起動 → WiFi接続中 → WiFi接続完了 → サーバー検索中 → サーバー接続完了 → ステータス
+ *   起動 → WiFi接続中 → WiFi接続完了 → サーバー接続完了 → ステータス
  *
  * 依存ライブラリ:
  *   - M5Unified           https://github.com/m5stack/M5Unified
- *   - M5Module-Audio      https://github.com/m5stack/M5Module-Audio
  *   - arduino-snapclient  https://github.com/pschatzmann/arduino-snapclient (main branch)
  *   - arduino-audio-tools https://github.com/pschatzmann/arduino-audio-tools
  *   - arduino-libopus     https://github.com/pschatzmann/arduino-libopus
@@ -19,9 +18,6 @@
 #define CORE_DEBUG_LEVEL 1
 
 #include <M5Unified.h>
-#include "audio_i2c.hpp"
-#include "es8388.hpp"
-#include <Wire.h>
 #include <WiFi.h>
 #include <LittleFS.h>
 #include "AudioTools.h"
@@ -34,16 +30,10 @@
 //  Ctrl+Shift+P → "Upload LittleFS" で書き込み
 // ═══════════════════════════════════════════════════════════════
 
-// ─── I2S ピン (M5Stack Core + M5Stack Audio Module) ───────────
-#define PIN_MCLK   0
+// ─── I2S ピン (M5Stack Core + RCA Module 13.2 / PCM5102A) ────
 #define PIN_BCLK  13
-#define PIN_WS    12
+#define PIN_WS     0
 #define PIN_DATA  15
-
-// ─── ES8388 ───────────────────────────────────────────────────
-#define ES8388_ADDR  0x10
-#define I2C_SDA      21
-#define I2C_SCL      22
 
 // ═══════════════════════════════════════════════════════════════
 //  カラー定義 (RGB565)
@@ -82,8 +72,6 @@ int          animStep   = 0;
 // ═══════════════════════════════════════════════════════════════
 //  オーディオ
 // ═══════════════════════════════════════════════════════════════
-AudioI2c           audioI2c;
-ES8388             es8388(&Wire, I2C_SDA, I2C_SCL);
 I2SStream          i2sOut;
 OpusAudioDecoder   opusDecoder;
 WiFiClient         wifiClient;
@@ -134,8 +122,6 @@ static void loadEnv() {
   snapcastHost = envGet(src, "SNAPCAST_HOST");
   Serial.printf("[env] SSID=%s HOST=%s\n", wifiSSID.c_str(), snapcastHost.c_str());
 }
-
-// ES8388初期化はM5ModuleAudioライブラリが担当
 
 // ═══════════════════════════════════════════════════════════════
 //  共通 UI パーツ
@@ -421,23 +407,8 @@ void setup() {
   Serial.printf("[wifi] Connected! IP=%s\n", localIP.c_str());
   delay(1800);
 
-  // ④ M5Module-Audio (ES8388 + STM32) 初期化
-  Serial.println("[audio] AudioI2c + ES8388 init...");
-  audioI2c.begin(&Wire, I2C_SDA, I2C_SCL, 100000, 0x33);
-  audioI2c.setHPMode(AUDIO_HPMODE_NATIONAL);
-  audioI2c.setMICStatus(AUDIO_MIC_CLOSE);
-  Serial.printf("[audio] HP insert: %d\n", audioI2c.getHPInsertStatus());
-  Serial.printf("[audio] FW version: %d\n", audioI2c.getFirmwareVersion());
-
-  es8388.init();
-  es8388.setDACOutput(DAC_OUTPUT_ALL);
-  es8388.setDACVolume(80);
-  es8388.setDACmute(false);
-  es8388.setSampleRate(SAMPLE_RATE_48K);
-  es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
-  Serial.println("[audio] ES8388 configured");
-
-  // I2S出力 (audio-tools)
+  // ④ I2S → PCM5102A (RCA Module 13.2)
+  Serial.println("[audio] I2S + PCM5102A init...");
   auto cfg            = i2sOut.defaultConfig(TX_MODE);
   cfg.sample_rate     = 48000;
   cfg.bits_per_sample = 16;
@@ -445,7 +416,6 @@ void setup() {
   cfg.use_apll        = true;
   cfg.buffer_count    = 8;
   cfg.buffer_size     = 512;
-  cfg.pin_mck         = PIN_MCLK;
   cfg.pin_bck         = PIN_BCLK;
   cfg.pin_ws          = PIN_WS;
   cfg.pin_data        = PIN_DATA;
